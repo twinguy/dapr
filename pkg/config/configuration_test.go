@@ -454,6 +454,121 @@ func TestIsSecretAllowed(t *testing.T) {
 	}
 }
 
+func TestIsSecretAllowedWithReason(t *testing.T) {
+	testCases := []struct {
+		name            string
+		scope           SecretsScope
+		secretKey       string
+		expectedAllowed bool
+		expectedReason  string
+	}{
+		{
+			name:            "Empty scope default allow all",
+			secretKey:       "random",
+			expectedAllowed: true,
+			expectedReason:  "DefaultAccess is set to 'allow' and key is not in DeniedSecrets",
+		},
+		{
+			name:            "Empty scope default allow all empty key",
+			secretKey:       "",
+			expectedAllowed: true,
+			expectedReason:  "DefaultAccess is set to 'allow' and key is not in DeniedSecrets",
+		},
+		{
+			name: "default deny all secrets empty key",
+			scope: SecretsScope{
+				StoreName:     "testName",
+				DefaultAccess: "DeNy", // check case-insensitivity
+			},
+			secretKey:       "",
+			expectedAllowed: false,
+			expectedReason:  "DefaultAccess is set to 'deny' and key is not in AllowedSecrets",
+		},
+		{
+			name: "default allow all secrets empty key",
+			scope: SecretsScope{
+				StoreName:     "testName",
+				DefaultAccess: "AllOw", // check case-insensitivity
+			},
+			secretKey:       "",
+			expectedAllowed: true,
+			expectedReason:  "DefaultAccess is set to 'allow' and key is not in DeniedSecrets",
+		},
+		{
+			name: "default deny all secrets",
+			scope: SecretsScope{
+				StoreName:     "testName",
+				DefaultAccess: DenyAccess,
+			},
+			secretKey:       "random",
+			expectedAllowed: false,
+			expectedReason:  "DefaultAccess is set to 'deny' and key is not in AllowedSecrets",
+		},
+		{
+			name: "default deny with specific allow secrets",
+			scope: SecretsScope{
+				StoreName:      "testName",
+				DefaultAccess:  DenyAccess,
+				AllowedSecrets: []string{"key1"},
+			},
+			secretKey:       "key1",
+			expectedAllowed: true,
+			expectedReason:  "Key is in AllowedSecrets list",
+		},
+		{
+			name: "default deny with key not in allowed secrets",
+			scope: SecretsScope{
+				StoreName:      "testName",
+				DefaultAccess:  DenyAccess,
+				AllowedSecrets: []string{"key1"},
+			},
+			secretKey:       "key2",
+			expectedAllowed: false,
+			expectedReason:  "Key is not in AllowedSecrets list and AllowedSecrets is configured",
+		},
+		{
+			name: "default allow with specific allow secrets and key not in list",
+			scope: SecretsScope{
+				StoreName:      "testName",
+				DefaultAccess:  AllowAccess,
+				AllowedSecrets: []string{"key1"},
+			},
+			secretKey:       "key2",
+			expectedAllowed: false,
+			expectedReason:  "Key is not in AllowedSecrets list and AllowedSecrets is configured",
+		},
+		{
+			name: "default allow with specific deny secrets",
+			scope: SecretsScope{
+				StoreName:     "testName",
+				DefaultAccess: AllowAccess,
+				DeniedSecrets: []string{"key1"},
+			},
+			secretKey:       "key1",
+			expectedAllowed: false,
+			expectedReason:  "Key is in DeniedSecrets list",
+		},
+		{
+			name: "default allow with non-denied key",
+			scope: SecretsScope{
+				StoreName:     "testName",
+				DefaultAccess: AllowAccess,
+				DeniedSecrets: []string{"key1"},
+			},
+			secretKey:       "key2",
+			expectedAllowed: true,
+			expectedReason:  "DefaultAccess is set to 'allow' and key is not in DeniedSecrets",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			allowed, reason := tc.scope.IsSecretAllowedWithReason(tc.secretKey)
+			assert.Equal(t, tc.expectedAllowed, allowed, "incorrect access result")
+			assert.Equal(t, tc.expectedReason, reason, "incorrect reason")
+		})
+	}
+}
+
 func TestContainsKey(t *testing.T) {
 	s := []string{"a", "b", "c", "z"}
 	assert.False(t, containsKey(s, "h"), "unexpected result")

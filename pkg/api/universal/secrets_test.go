@@ -14,6 +14,9 @@ limitations under the License.
 package universal
 
 import (
+	"bytes"
+	"context"
+	"io"
 	"testing"
 	"time"
 
@@ -29,7 +32,162 @@ import (
 	"github.com/dapr/dapr/pkg/resiliency"
 	"github.com/dapr/dapr/pkg/runtime/compstore"
 	daprt "github.com/dapr/dapr/pkg/testing"
+	"github.com/dapr/kit/logger"
 )
+
+// CustomSecretStore implements secretstores.SecretStore for testing
+type CustomSecretStore struct {
+	daprt.FakeSecretStore
+	bulkSecrets map[string]map[string]string
+}
+
+func (c CustomSecretStore) GetSecret(ctx context.Context, req secretstores.GetSecretRequest) (secretstores.GetSecretResponse, error) {
+	// Inherit from FakeSecretStore for normal GetSecret
+	return c.FakeSecretStore.GetSecret(ctx, req)
+}
+
+func (c CustomSecretStore) BulkGetSecret(ctx context.Context, req secretstores.BulkGetSecretRequest) (secretstores.BulkGetSecretResponse, error) {
+	return secretstores.BulkGetSecretResponse{
+		Data: c.bulkSecrets,
+	}, nil
+}
+
+func (c CustomSecretStore) Features() []secretstores.Feature {
+	return []secretstores.Feature{}
+}
+
+// TestIsSecretAllowedWithReason tests the enhanced isSecretAllowed method
+// to verify it correctly uses IsSecretAllowedWithReason and provides
+// detailed logging.
+func TestIsSecretAllowedWithReason(t *testing.T) {
+	testCases := []struct {
+		testName       string
+		storeName      string
+		key            string
+		scope          config.SecretsScope
+		expectedResult bool
+		expectedReason string // This should match the reason in IsSecretAllowedWithReason
+	}{
+		{
+			testName:  "Key allowed by default access",
+			storeName: "store1",
+			key:       "allowed-key",
+			scope: config.SecretsScope{
+				StoreName:     "store1",
+				DefaultAccess: config.AllowAccess,
+			},
+			expectedResult: true,
+			expectedReason: "DefaultAccess is set to 'allow' and key is not in DeniedSecrets",
+		},
+		{
+			testName:  "Key denied by default access",
+			storeName: "store2",
+			key:       "random-key",
+			scope: config.SecretsScope{
+				StoreName:     "store2",
+				DefaultAccess: config.DenyAccess,
+			},
+			expectedResult: false,
+			expectedReason: "DefaultAccess is set to 'deny' and key is not in AllowedSecrets",
+		},
+		{
+			testName:  "Key in allowed list",
+			storeName: "store3",
+			key:       "specific-key",
+			scope: config.SecretsScope{
+				StoreName:      "store3",
+				DefaultAccess:  config.DenyAccess,
+				AllowedSecrets: []string{"specific-key"},
+			},
+			expectedResult: true,
+			expectedReason: "Key is in AllowedSecrets list",
+		},
+		{
+			testName:  "Key not in allowed list",
+			storeName: "store4",
+			key:       "random-key",
+			scope: config.SecretsScope{
+				StoreName:      "store4",
+				DefaultAccess:  config.AllowAccess,
+				AllowedSecrets: []string{"specific-key"},
+			},
+			expectedResult: false,
+			expectedReason: "Key is not in AllowedSecrets list and AllowedSecrets is configured",
+		},
+		{
+			testName:  "Key in denied list",
+			storeName: "store5",
+			key:       "denied-key",
+			scope: config.SecretsScope{
+				StoreName:     "store5",
+				DefaultAccess: config.AllowAccess,
+				DeniedSecrets: []string{"denied-key"},
+			},
+			expectedResult: false,
+			expectedReason: "Key is in DeniedSecrets list",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.testName, func(t *testing.T) {
+			// Create a buffer to capture logs
+			logBuffer := &bytes.Buffer{}
+			testLogger := logger.NewLogger("test-secrets-logger")
+			testLogger.SetOutput(io.MultiWriter(logBuffer, io.Discard)) // Send logs to buffer and nowhere
+			testLogger.SetOutputLevel(logger.DebugLevel)
+
+			// Create the component store and add the configuration
+			compStore := compstore.New()
+			compStore.AddSecretsConfiguration(tc.storeName, tc.scope)
+
+			// Create the API with our test logger
+			fakeAPI := &Universal{
+				logger:    testLogger,
+				compStore: compStore,
+			}
+
+			// Call the method
+			result := fakeAPI.isSecretAllowed(tc.storeName, tc.key)
+
+			// Verify the result
+			assert.Equal(t, tc.expectedResult, result, "isSecretAllowed returned unexpected result")
+
+			// For denied access, check that the logs contain the expected reason
+			if !tc.expectedResult {
+				// Check that the log contains the expected strings instead of parsing as JSON
+				logContent := logBuffer.String()
+				assert.Contains(t, logContent, "Secret access denied")
+				assert.Contains(t, logContent, tc.key)
+				assert.Contains(t, logContent, tc.storeName)
+				assert.Contains(t, logContent, tc.expectedReason)
+			}
+		})
+	}
+
+	// Test case with no scoping configuration
+	t.Run("No secret configuration returns true", func(t *testing.T) {
+		// Create a buffer to capture logs
+		logBuffer := &bytes.Buffer{}
+		testLogger := logger.NewLogger("test-secrets-logger")
+		testLogger.SetOutput(io.MultiWriter(logBuffer, io.Discard)) // Send logs to buffer and nowhere
+		testLogger.SetOutputLevel(logger.DebugLevel)
+
+		// Create the API with our test logger
+		fakeAPI := &Universal{
+			logger:    testLogger,
+			compStore: compstore.New(), // Empty component store with no configurations
+		}
+
+		// Call the method
+		result := fakeAPI.isSecretAllowed("non-existent-store", "some-key")
+
+		// Verify the result
+		assert.True(t, result, "isSecretAllowed should return true for non-configured store")
+
+		// Verify the debug log
+		assert.Contains(t, logBuffer.String(), "No secret scoping configuration found for store")
+	})
+}
 
 func TestSecretStoreNotConfigured(t *testing.T) {
 	// Setup Dapr API
@@ -317,4 +475,139 @@ func TestSecretAPIWithResiliency(t *testing.T) {
 		assert.Equal(t, 2, failingStore.Failure.CallCount("bulkTimeout"))
 		assert.Less(t, end.Sub(start), time.Second*30)
 	})
+}
+
+func TestGetSecretEnhancedLogging(t *testing.T) {
+	// Create test components
+	fakeStore := daprt.FakeSecretStore{}
+
+	storeName := "test-store"
+	secretKey := "denied-key"
+
+	// Create a buffer to capture logs
+	logBuffer := &bytes.Buffer{}
+	testLogger := logger.NewLogger("test-secrets-logger")
+	testLogger.SetOutput(io.MultiWriter(logBuffer, io.Discard)) // Send logs to buffer and nowhere
+	testLogger.SetOutputLevel(logger.InfoLevel)
+
+	// Setup component store with a secret store and a configuration that will deny access
+	compStore := compstore.New()
+	compStore.AddSecretStore(storeName, fakeStore)
+	compStore.AddSecretsConfiguration(storeName, config.SecretsScope{
+		StoreName:     storeName,
+		DefaultAccess: config.DenyAccess,
+	})
+
+	// Create the API with our test logger
+	fakeAPI := &Universal{
+		logger:     testLogger,
+		compStore:  compStore,
+		resiliency: resiliency.New(nil),
+	}
+
+	// Execute the GetSecret method with parameters that will trigger a permission denial
+	req := &runtimev1pb.GetSecretRequest{
+		StoreName: storeName,
+		Key:       secretKey,
+	}
+
+	// This should be denied and generate enhanced error logs
+	_, err := fakeAPI.GetSecret(t.Context(), req)
+
+	// Verify the error is as expected
+	require.Error(t, err)
+	assert.Equal(t, codes.PermissionDenied, status.Code(err))
+
+	// Check that the logs contain detailed information - without parsing as JSON
+	logContent := logBuffer.String()
+	assert.Contains(t, logContent, "Secret access denied")
+	assert.Contains(t, logContent, secretKey)
+	assert.Contains(t, logContent, storeName)
+	assert.Contains(t, logContent, "DefaultAccess is set to 'deny'")
+}
+
+func TestGetBulkSecretEnhancedLogging(t *testing.T) {
+	// Create a custom secret store that returns multiple secrets including one that will be denied
+	mockBulkStore := CustomSecretStore{
+		bulkSecrets: map[string]map[string]string{
+			"allowed-key": {"allowed-key": "allowed value"},
+			"denied-key":  {"denied-key": "denied value"},
+		},
+	}
+
+	storeName := "test-store"
+	deniedKey := "denied-key"
+
+	// Create a buffer to capture logs
+	logBuffer := &bytes.Buffer{}
+	testLogger := logger.NewLogger("test-secrets-logger")
+	testLogger.SetOutput(io.MultiWriter(logBuffer, io.Discard))
+	testLogger.SetOutputLevel(logger.InfoLevel)
+
+	// Setup component store with a secret store and a configuration that will deny specific secrets
+	compStore := compstore.New()
+	compStore.AddSecretStore(storeName, mockBulkStore)
+	compStore.AddSecretsConfiguration(storeName, config.SecretsScope{
+		StoreName:     storeName,
+		DefaultAccess: config.AllowAccess,
+		DeniedSecrets: []string{deniedKey},
+	})
+
+	// Create the API with our test logger
+	fakeAPI := &Universal{
+		logger:     testLogger,
+		compStore:  compStore,
+		resiliency: resiliency.New(nil),
+	}
+
+	// Execute the GetBulkSecret method
+	req := &runtimev1pb.GetBulkSecretRequest{
+		StoreName: storeName,
+	}
+
+	// This should filter out the denied secrets and log information about them
+	resp, err := fakeAPI.GetBulkSecret(t.Context(), req)
+
+	// Verify there was no error but the denied secret was filtered
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.NotNil(t, resp.Data)
+
+	// The denied key should not be in the response
+	_, exists := resp.Data[deniedKey]
+	assert.False(t, exists, "Denied key should be filtered out of the response")
+
+	// The allowed key should be in the response
+	_, exists = resp.Data["allowed-key"]
+	assert.True(t, exists, "Allowed key should be in the response")
+
+	// Check that the logs contain detailed information about denied secrets
+	logString := logBuffer.String()
+
+	// Look for the enhanced denied secrets log
+	assert.Contains(t, logString, "Some secrets were denied access")
+	assert.Contains(t, logString, deniedKey)
+	assert.Contains(t, logString, "Key is in DeniedSecrets list") // This is the reason
+}
+
+// TestCustomSecretStore is a simple test of our CustomSecretStore implementation
+func TestCustomSecretStore(t *testing.T) {
+	mockStore := CustomSecretStore{
+		bulkSecrets: map[string]map[string]string{
+			"key1": {"key1": "value1"},
+			"key2": {"key2": "value2"},
+		},
+	}
+
+	// Test GetSecret
+	resp, err := mockStore.GetSecret(t.Context(), secretstores.GetSecretRequest{Name: "good-key"})
+	require.NoError(t, err)
+	assert.Equal(t, "life is good", resp.Data["good-key"])
+
+	// Test BulkGetSecret
+	bulkResp, err := mockStore.BulkGetSecret(t.Context(), secretstores.BulkGetSecretRequest{})
+	require.NoError(t, err)
+	assert.Equal(t, 2, len(bulkResp.Data))
+	assert.Equal(t, "value1", bulkResp.Data["key1"]["key1"])
+	assert.Equal(t, "value2", bulkResp.Data["key2"]["key2"])
 }
