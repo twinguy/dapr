@@ -15,6 +15,7 @@ package universal
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/dapr/components-contrib/secretstores"
@@ -33,8 +34,18 @@ func (a *Universal) GetSecret(ctx context.Context, in *runtimev1pb.GetSecretRequ
 	}
 
 	if !a.isSecretAllowed(in.GetStoreName(), in.GetKey()) {
+		config, ok := a.compStore.GetSecretsConfiguration(in.GetStoreName())
 		err = messages.ErrSecretPermissionDenied.WithFormat(in.GetKey(), in.GetStoreName())
-		a.logger.Debug(err)
+
+		if ok {
+			_, reason := config.IsSecretAllowedWithReason(in.GetKey())
+			a.logger.Infof("Secret access denied. Key: %s, Store: %s, Reason: %s, DefaultAccess: %s, AllowedSecrets: %v, DeniedSecrets: %v",
+				in.GetKey(), in.GetStoreName(), reason, config.DefaultAccess,
+				config.AllowedSecrets, config.DeniedSecrets)
+		} else {
+			a.logger.Infof("Secret access denied. Key: %s, Store: %s, No scoping configuration found",
+				in.GetKey(), in.GetStoreName())
+		}
 		return response, err
 	}
 
@@ -103,11 +114,31 @@ func (a *Universal) GetBulkSecret(ctx context.Context, in *runtimev1pb.GetBulkSe
 		return response, nil
 	}
 	filteredSecrets := map[string]map[string]string{}
+	var deniedSecrets []string
+	var deniedSecretReasons []string
+
 	for key, v := range getResponse.Data {
 		if a.isSecretAllowed(in.GetStoreName(), key) {
 			filteredSecrets[key] = v
 		} else {
+			deniedSecrets = append(deniedSecrets, key)
+			if config, ok := a.compStore.GetSecretsConfiguration(in.GetStoreName()); ok {
+				_, reason := config.IsSecretAllowedWithReason(key)
+				deniedSecretReasons = append(deniedSecretReasons,
+					fmt.Sprintf("%s: %s", key, reason))
+			}
 			a.logger.Debugf(messages.ErrSecretPermissionDenied.WithFormat(key, in.GetStoreName()).String())
+		}
+	}
+
+	if len(deniedSecrets) > 0 {
+		config, ok := a.compStore.GetSecretsConfiguration(in.GetStoreName())
+		if ok {
+			a.logger.Infof("Some secrets were denied access. Store: %s, DefaultAccess: %s, Denied keys with reasons: %v",
+				in.GetStoreName(), config.DefaultAccess, deniedSecretReasons)
+		} else {
+			a.logger.Infof("Some secrets were denied access. Store: %s, No scoping configuration found. Denied keys: %v",
+				in.GetStoreName(), deniedSecrets)
 		}
 	}
 
@@ -142,8 +173,17 @@ func (a *Universal) secretsValidateRequest(componentName string) (secretstores.S
 
 func (a *Universal) isSecretAllowed(storeName, key string) bool {
 	if config, ok := a.compStore.GetSecretsConfiguration(storeName); ok {
-		return config.IsSecretAllowed(key)
+		allowed, reason := config.IsSecretAllowedWithReason(key)
+		if !allowed {
+			a.logger.Infof("Secret access denied. Key: %s, Store: %s, Reason: %s, DefaultAccess: %s, "+
+				"AllowedSecrets: %v, DeniedSecrets: %v",
+				key, storeName, reason, config.DefaultAccess,
+				config.AllowedSecrets, config.DeniedSecrets)
+		}
+		return allowed
 	}
 	// By default, if a configuration is not defined for a secret store, return true.
+	a.logger.Debugf("No secret scoping configuration found for store %s, defaulting to allow access for key %s",
+		storeName, key)
 	return true
 }

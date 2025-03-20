@@ -638,8 +638,8 @@ func SetTracingSpecFromEnv(conf *Configuration) error {
 	return nil
 }
 
-// IsSecretAllowed Check if the secret is allowed to be accessed.
-func (c SecretsScope) IsSecretAllowed(key string) bool {
+// IsSecretAllowedWithReason returns whether a secret is allowed and the reason why it was allowed or denied
+func (c SecretsScope) IsSecretAllowedWithReason(key string) (bool, string) {
 	// By default, set allow access for the secret store.
 	access := AllowAccess
 	// Check and set deny access.
@@ -649,17 +649,30 @@ func (c SecretsScope) IsSecretAllowed(key string) bool {
 
 	// If the allowedSecrets list is not empty then check if the access is specifically allowed for this key.
 	if len(c.AllowedSecrets) != 0 {
-		return containsKey(c.AllowedSecrets, key)
+		allowed := containsKey(c.AllowedSecrets, key)
+		if allowed {
+			return true, "Key is in AllowedSecrets list"
+		}
+		return false, "Key is not in AllowedSecrets list and AllowedSecrets is configured"
 	}
 
 	// Check key in deny list if deny list is present for the secret store.
-	// If the specific key is denied, then alone deny access.
 	if deny := containsKey(c.DeniedSecrets, key); deny {
-		return !deny
+		return false, "Key is in DeniedSecrets list"
 	}
 
 	// Check if defined default access is allow.
-	return access == AllowAccess
+	if access == AllowAccess {
+		return true, "DefaultAccess is set to 'allow' and key is not in DeniedSecrets"
+	}
+
+	return false, "DefaultAccess is set to 'deny' and key is not in AllowedSecrets"
+}
+
+// IsSecretAllowed Check if the secret is allowed to be accessed.
+func (c SecretsScope) IsSecretAllowed(key string) bool {
+	allowed, _ := c.IsSecretAllowedWithReason(key)
+	return allowed
 }
 
 // Runs Binary Search on a sorted list of strings to find a key.

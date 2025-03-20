@@ -80,7 +80,7 @@ var (
 	// Secrets.
 	ErrSecretStoreNotConfigured = APIError{"secret store is not configured", errorcodes.SecretStoreNotConfigured, http.StatusInternalServerError, grpcCodes.FailedPrecondition}
 	ErrSecretStoreNotFound      = APIError{"failed finding secret store with key %s", errorcodes.SecretStoreNotFound, http.StatusUnauthorized, grpcCodes.InvalidArgument}
-	ErrSecretPermissionDenied   = APIError{"access denied by policy to get %q from %q", errorcodes.SecretPermissionDenied, http.StatusForbidden, grpcCodes.PermissionDenied}
+	ErrSecretPermissionDenied   = APIError{"access denied by policy to get %q from %q - check your secrets scoping configuration", errorcodes.SecretPermissionDenied, http.StatusForbidden, grpcCodes.PermissionDenied}
 	ErrSecretGet                = APIError{"failed getting secret with key %s from secret store %s: %s", errorcodes.SecretGet, http.StatusInternalServerError, grpcCodes.Internal}
 	ErrBulkSecretGet            = APIError{"failed getting secrets from secret store %s: %v", errorcodes.SecretGet, http.StatusInternalServerError, grpcCodes.Internal}
 
